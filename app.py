@@ -106,13 +106,31 @@ SCALER_PATH = os.path.join(os.path.dirname(__file__), 'scaler.pkl')
 def load_model_and_scaler():
     loaded_model = None
     loaded_scaler = None
+    model_err = None
+
     if os.path.exists(MODEL_PATH):
+        # Auto-detect unpulled Git LFS pointer file (< 2 KB text file)
+        try:
+            file_size = os.path.getsize(MODEL_PATH)
+            if file_size < 2048:
+                with open(MODEL_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+                    txt = f.read(512)
+                if 'git-lfs' in txt:
+                    print("Detected Git LFS pointer for model.pkl. Pulling via git lfs pull...")
+                    import subprocess
+                    subprocess.run(["git", "lfs", "pull"], check=False)
+        except Exception as lfs_e:
+            print(f"Git LFS check notice: {lfs_e}")
+
         try:
             with open(MODEL_PATH, 'rb') as f:
                 loaded_model = pickle.load(f)
             print("CutoffIQ Ensemble Model loaded successfully!")
         except Exception as e:
+            model_err = str(e)
             print(f"Error loading model from {MODEL_PATH}: {e}")
+    else:
+        model_err = f"File not found at {MODEL_PATH}"
 
     if os.path.exists(SCALER_PATH):
         try:
@@ -122,7 +140,7 @@ def load_model_and_scaler():
         except Exception as e:
             print(f"Note: Scaler load warning: {e}")
 
-    return loaded_model, loaded_scaler
+    return loaded_model, loaded_scaler, model_err
 
 
 # ---------------------------------------------------------
@@ -135,13 +153,14 @@ try:
 
     @flask_app.route('/', methods=['GET'])
     def health():
-        m, s = load_model_and_scaler()
+        m, s, _ = load_model_and_scaler()
         return jsonify({
             'status': 'healthy',
             'service': 'CutoffIQ API',
             'version': '1.0.0',
             'model_loaded': m is not None,
             'scaler_loaded': s is not None,
+
             'endpoints': {
                 '/predict': {
                     'method': 'POST',
@@ -156,7 +175,7 @@ try:
 
     @flask_app.route('/predict', methods=['POST'])
     def predict_endpoint():
-        m, _ = load_model_and_scaler()
+        m, _, _ = load_model_and_scaler()
         if m is None:
             return jsonify({'status': 'error', 'message': 'Model is not loaded.'}), 500
 
@@ -249,7 +268,7 @@ def render_streamlit_frontend():
     def get_model_and_scaler():
         return load_model_and_scaler()
 
-    model, scaler = get_model_and_scaler()
+    model, scaler, model_err = get_model_and_scaler()
 
     # Extract vocabulary from target encoder if available
     known_unis = []
@@ -317,7 +336,20 @@ curl -X POST https://your-domain/predict \\
     st.markdown('<div class="sub-header">Estimate university and college admission cutoff scores across diverse quotas, programmes, and rounds.</div>', unsafe_allow_html=True)
 
     if model is None:
-        st.error("⚠️ Model file (`model.pkl`) could not be loaded. Please ensure the weights file is present in the repository root.")
+        file_sz = f"{os.path.getsize(MODEL_PATH):,} bytes" if os.path.exists(MODEL_PATH) else "Not found"
+        st.error(f"⚠️ **Model file (`model.pkl`) could not be loaded**: `{model_err}`\n\n*(Detected file size on disk: {file_sz})*")
+        
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("🔄 Pull Git LFS & Reload Model", type="primary", use_container_width=True):
+                import subprocess
+                subprocess.run(["git", "lfs", "pull"], check=False)
+                st.cache_resource.clear()
+                st.rerun()
+        with col_b2:
+            if st.button("🧹 Clear Streamlit Cache & Retry", use_container_width=True):
+                st.cache_resource.clear()
+                st.rerun()
         return
 
     # Tabs
